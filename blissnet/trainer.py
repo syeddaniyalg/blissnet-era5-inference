@@ -208,16 +208,13 @@ class BLISSNetTrainer:
             self.s2_optimizer.zero_grad()
             pred, s_coefs, _, s_emb = self.s2_model(obs_values, obs_coords, coords)
 
-            # Capture ALL outputs dynamically
             loss_outputs = self.s2_loss_fn(
                 pred, s_coefs, s_emb, t_coefs, t_emb, u_true, sensor_mask=sensor_mask
             )
-            
-            # --- DYNAMIC LOSS PARSING ---
+    
             if isinstance(loss_outputs, tuple):
                 loss = loss_outputs[0]
                 
-                # Case A: Loss function returns (total_loss, dict_of_losses)
                 if len(loss_outputs) == 2 and isinstance(loss_outputs[1], dict):
                     for k, v in loss_outputs[1].items():
                         k_lower = k.lower()
@@ -227,14 +224,13 @@ class BLISSNetTrainer:
                         elif 'emb' in k_lower: running_components['emb'] += val
                         elif 'gt' in k_lower: running_components['gt'] += val
                         
-                # Case B: Loss function returns (total_loss, l_cp, l_coef, l_emb, l_gt)
                 elif len(loss_outputs) >= 5:
                     running_components['cp'] += loss_outputs[1].item() if isinstance(loss_outputs[1], torch.Tensor) else float(loss_outputs[1])
                     running_components['coef'] += loss_outputs[2].item() if isinstance(loss_outputs[2], torch.Tensor) else float(loss_outputs[2])
                     running_components['emb'] += loss_outputs[3].item() if isinstance(loss_outputs[3], torch.Tensor) else float(loss_outputs[3])
                     running_components['gt'] += loss_outputs[4].item() if isinstance(loss_outputs[4], torch.Tensor) else float(loss_outputs[4])
             else:
-                loss = loss_outputs  # Fallback if it only returns total_loss
+                loss = loss_outputs
 
             loss.backward()
             nn.utils.clip_grad_norm_([p for p in self.s2_model.parameters() if p.requires_grad], self.grad_clip)
@@ -268,7 +264,6 @@ class BLISSNetTrainer:
                 pred, s_coefs, s_emb, t_coefs, t_emb, u_true, sensor_mask=sensor_mask
             )
             
-            # Safely extract just the total loss for validation tracking
             loss = loss_outputs[0] if isinstance(loss_outputs, tuple) else loss_outputs
             total_loss += loss.item()
 
