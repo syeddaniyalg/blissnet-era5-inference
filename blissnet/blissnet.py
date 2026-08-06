@@ -276,13 +276,15 @@ class CrossAttention(nn.Module):
 
         kv = self.kv_w(y).reshape(B, S_B, H, 2, head_size)
         K, V = kv.unbind(dim=-2) # B, S_B, H, head_size
+        K = K.permute(0, 2, 1, 3)   # B,H,S_B,head_size
+        V = V.permute(0, 2, 1, 3)
 
-        attention = (Q.permute(0, 2, 1, 3) @ K.permute(0, 2, 3, 1)) / (head_size ** 0.5) # B, H, S_A, S_B
-        attention_score = torch.softmax(attention, dim=-1) 
-        attention_score = self.dropout(attention_score) 
+        output = F.scaled_dot_product_attention(
+            Q, K, V,
+            dropout_p=self.dropout_p if self.training else 0.0
+        )  # B,H,S_A,head_size
 
-        output = (attention_score @ V.permute(0, 2, 1, 3)).permute(0, 2, 1, 3) # B, S_A, H, head_size
-        output = output.reshape(B, S_A, emb_dim)
+        output = output.permute(0, 2, 1, 3).reshape(B, S_A, emb_dim)
         output = self.projection(output)
         return output
 
@@ -380,7 +382,7 @@ class BLISSNet(nn.Module):
         
         self.phase = phase
         if phase == 0:
-            self.branch1 = BranchNet1(self.emb_dim, self.K, config.in_channels, config.base_channels, self.n_heads, config.n_groups, self.dropout, config.n_transformer_layers, config.n_hidden_linear_layers)
+            self.branch1 = BranchNet1(self.emb_dim, self.K, config.in_channels, config.base_channels, self.n_heads, config.n_groups, self.dropout, config.n_transformer_layers, config.n_hidden_linear_layers, config.pool_factor)
 
             self.trunk_net = SIREN(config.siren_hidden_dim, config.siren_layers, self.K, config.omega)
         else:
