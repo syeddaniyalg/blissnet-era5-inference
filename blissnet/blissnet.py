@@ -289,7 +289,7 @@ class CrossAttention(nn.Module):
         return output
 
 class BranchNet1(nn.Module):
-    def __init__(self, emb_dim, K, in_channels, base_channels, n_heads, n_groups, dropout=0.1, n_transformer_layers=4, n_hidden_linear_layers=3, pool_factor=4):
+    def __init__(self, emb_dim, H, W, K, in_channels, base_channels, n_heads, n_groups, dropout=0.1, n_transformer_layers=4, n_hidden_linear_layers=3, pool_factor=4):
         super().__init__()
 
         self.K = K
@@ -299,27 +299,22 @@ class BranchNet1(nn.Module):
         self.pool = nn.AvgPool2d(pool_factor)
         self.linear_proj = nn.Linear(in_channels, emb_dim)
 
-        self.decoder = nn.Sequential(
-            *[Transformer(emb_dim, n_heads, dropout) for _ in range(n_transformer_layers)],
-            nn.Linear(emb_dim, emb_dim * 4),
-            nn.SiLU(),
-            *[nn.Sequential(nn.Linear(emb_dim*4, emb_dim*4), nn.SiLU()) for _ in range(n_hidden_linear_layers - 1)],
-            nn.Linear(emb_dim*4, K)
+        self.transformer_blocks = nn.Sequential(
+            *[Transformer(emb_dim, n_heads, dropout) for _ in range(n_transformer_layers)]
         )
-
-        n_stages = int(math.log2(pool_factor))
-        up_layers = []
-        ch = K
-        for _ in range(n_stages):
-            up_layers += [
-                nn.ConvTranspose2d(ch, ch, kernel_size=2, stride=2),
-                nn.GroupNorm(1, ch),
-                nn.GELU(),
-            ]
-        self.upsample = nn.Sequential(*up_layers)
-
-        self.coeff_query = nn.Parameter(torch.randn(1, 1, K) * 0.02)
-        self.coeff_pool = CrossAttention(K, n_heads, dropout)
+        
+        S = (H // pool_factor) * (W // pool_factor) 
+        
+        exp_dim = emb_dim * 2 
+        
+        self.mlp_decoder = nn.Sequential(
+            nn.Linear(emb_dim, 64),           
+            nn.Flatten(start_dim=1),       
+            nn.Linear(S * 64, exp_dim),           
+            nn.SiLU(),
+            *[nn.Sequential(nn.Linear(exp_dim, exp_dim), nn.SiLU()) for _ in range(n_hidden_linear_layers - 1)],
+            nn.Linear(exp_dim, K)
+        )
 
     def forward(self, x):
         B, C, H, W = x.shape
@@ -329,19 +324,11 @@ class BranchNet1(nn.Module):
         output = output.reshape(B, C, Hp*Wp).permute(0, 2, 1)
         embedded_out = self.linear_proj(output) # B, S, emb_dim
         output = embedded_out
-        for layer in self.decoder:
+        for layer in self.transformer_blocks:
             output = checkpoint(layer, output, use_reentrant=False)
-
-        coeff_map = output.permute(0, 2, 1).reshape(B, self.K, Hp, Wp)
-        coeff_map = self.upsample(coeff_map)
-        if coeff_map.shape[-2:] != (H, W):
-            coeff_map = F.interpolate(coeff_map, size=(H, W), mode='nearest')
-
-        coeff_seq = coeff_map.reshape(B, self.K, H*W).permute(0, 2, 1)
-        query = self.coeff_query.expand(B, -1, -1)
-        coefficients = self.coeff_pool(query, coeff_seq).squeeze(1)
-
-        return coefficients, embedded_out
+            
+        coeffs = self.mlp_decoder(output) # Output shape: (B, K)
+        return coeffs, embedded_out
 
 class FourierFeatureTransform(nn.Module):
     def __init__(self, feature_size, sigma=1):
@@ -356,7 +343,7 @@ class FourierFeatureTransform(nn.Module):
 
 
 class BranchNet2(nn.Module):
-    def __init__(self, frozen_decoder:nn.Module, grid_resolution, emb_dim, n_heads, dropout=0.1, K=None):
+    def __init__(self, frozen_transformer:nn.Module, frozen_mlp:nn.Module, grid_resolution, emb_dim, n_heads, dropout=0.1, K=None):
         super().__init__()
 
         grid_tensor = self.generate_grid(grid_resolution) # res, 2
@@ -366,11 +353,9 @@ class BranchNet2(nn.Module):
 
         self.transformer_encoder = TransformerEncoder(emb_dim, n_heads, dropout)
         self.cross_att = CrossAttention(emb_dim, n_heads, dropout)
-        self.decoder = frozen_decoder
-
+        self.transformer_blocks = frozen_transformer
+        self.mlp_decoder = frozen_mlp
         self.K = K
-        self.coeff_query = nn.Parameter(torch.randn(1, 1, K) * 0.02)
-        self.coeff_pool = CrossAttention(K, n_heads, dropout)
 
     def generate_grid(self, length):
         vec_a = torch.linspace(0, 1, length)
@@ -387,20 +372,19 @@ class BranchNet2(nn.Module):
 
         emb_output = self.cross_att(fourier_map, input_emb)
         output = emb_output
-        for layer in self.decoder:
+        for layer in self.transformer_blocks:
             output = checkpoint(layer, output, use_reentrant=False)
-
-        B = output.shape[0]
-        query = self.coeff_query.expand(B, -1, -1)
-        coefficients = self.coeff_pool(query, output).squeeze(1)
-
-        return coefficients, emb_output
+            
+        coeffs = self.mlp_decoder(output) # Output shape: (B, K)
+        return coeffs, emb_output
     
 class BLISSNet(nn.Module):
-    def __init__(self, emb_dim, K, n_heads, dropout=0.1):
+    def __init__(self, emb_dim, H, W, K, n_heads, dropout=0.1):
         super().__init__()
 
         self.emb_dim = emb_dim
+        self.H = H
+        self.W = W
         self.K = K
         self.n_heads = n_heads
         self.dropout = dropout
@@ -412,7 +396,7 @@ class BLISSNet(nn.Module):
         
         self.phase = phase
         if phase == 0:
-            self.branch1 = BranchNet1(self.emb_dim, self.K, config.in_channels, config.base_channels, self.n_heads, config.n_groups, self.dropout, config.n_transformer_layers, config.n_hidden_linear_layers, config.pool_factor)
+            self.branch1 = BranchNet1(self.emb_dim, self.H, self.W, self.K, config.in_channels, config.base_channels, self.n_heads, config.n_groups, self.dropout, config.n_transformer_layers, config.n_hidden_linear_layers, config.pool_factor)
 
             self.trunk_net = SIREN(config.siren_hidden_dim, config.siren_layers, self.K, config.omega)
         else:
@@ -425,7 +409,7 @@ class BLISSNet(nn.Module):
             self.branch1.eval()
             self.trunk_net.eval()
 
-            self.branch2 = BranchNet2(self.branch1.decoder, config.grid_size, self.emb_dim, self.n_heads, self.dropout, self.K)
+            self.branch2 = BranchNet2(self.branch1.transformer_blocks, self.branch1.mlp_decoder, config.grid_size, self.emb_dim, self.n_heads, self.dropout, self.K)
 
     def generate_grid(self, height, width, device=None):
         vec_a = torch.linspace(0, 1, height).to(device)
@@ -441,14 +425,16 @@ class BLISSNet(nn.Module):
         device = x.device if phase == 0 else x[0].device
 
         grid = self.generate_grid(H, W, device).unsqueeze(0)
-        basis = self.trunk_net(grid)
+        basis = self.trunk_net(grid) # 1, H, W, K
 
         if phase == 0:
-            coefficients, embedded_output = self.branch1(x)
+            coeff_map, embedded_output = self.branch1(x) # B, K
         else:
             x_vals, coords = x
-            coefficients, embedded_output = self.branch2(x_vals, coords)
+            coeff_map, embedded_output = self.branch2(x_vals, coords) # B, K
 
-        coeff = coefficients.reshape(coefficients.shape[0], 1, 1, self.K)
-        output = (basis * coeff).sum(dim=-1, keepdim=True)
-        return output.permute(0, 3, 1, 2), coefficients, embedded_output
+        coeffs = coeff_map.view(-1, 1, 1, self.K) 
+    
+        output = (basis * coeffs).sum(dim=-1, keepdim=True)
+
+        return output.permute(0, 3, 1, 2), coeff_map, embedded_output
