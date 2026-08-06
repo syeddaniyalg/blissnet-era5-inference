@@ -281,7 +281,7 @@ class CrossAttention(nn.Module):
 
         output = F.scaled_dot_product_attention(
             Q, K, V,
-            dropout_p=self.dropout_p if self.training else 0.0
+            dropout_p=self.dropout if self.training else 0.0
         )  # B,H,S_A,head_size
 
         output = output.permute(0, 2, 1, 3).reshape(B, S_A, emb_dim)
