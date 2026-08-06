@@ -307,13 +307,14 @@ class BranchNet1(nn.Module):
         B, C, H, W = x.shape
         output = self.att_unet(x)
         output = self.pool(output)
-        output = output.reshape(B, C, H*W).permute(0, 2, 1)
+        Hp, Wp = output.shape[-2:]                  
+        output = output.reshape(B, C, Hp*Wp).permute(0, 2, 1)
         embedded_out = self.linear_proj(output) # B, S, emb_dim
         cls_expanded = self.cls_token.expand(embedded_out.shape[0], -1, -1)
         output = torch.cat([cls_expanded, embedded_out], dim=1)
         for layer in self.decoder:
             output = checkpoint(layer, output, use_reentrant=False)
-
+    
         return output, embedded_out
 
 class FourierFeatureTransform(nn.Module):
@@ -359,8 +360,8 @@ class BranchNet2(nn.Module):
         cls_expanded = self.cls_token.expand(emb_output.shape[0], -1, -1)
         output = torch.cat([cls_expanded, emb_output], dim=1)
         for layer in self.decoder:
-            dec = checkpoint(layer, output, use_reentrant=False)
-
+            output = checkpoint(layer, output, use_reentrant=False)
+        dec = output
         return dec, emb_output
     
 class BLISSNet(nn.Module):
