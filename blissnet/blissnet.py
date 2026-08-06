@@ -324,8 +324,8 @@ class BranchNet1(nn.Module):
         B, C, H, W = x.shape
         output = self.att_unet(x)
         output = self.pool(output)
-        Hp, Wp = output.shape[-2:]                  
-        output = output.reshape(B, C, Hp*Wp).permute(0, 2, 1)
+        B, C_out, Hp, Wp = output.shape                  
+        output = output.reshape(B, C_out, Hp*Wp).permute(0, 2, 1)
         embedded_out = self.linear_proj(output) # B, S, emb_dim
         output = embedded_out
         for layer in self.transformer_blocks:
