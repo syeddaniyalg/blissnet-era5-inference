@@ -302,8 +302,12 @@ class BranchNet1(nn.Module):
         self.transformer_blocks = nn.Sequential(
             *[Transformer(emb_dim, n_heads, dropout) for _ in range(n_transformer_layers)]
         )
-        
-        S = (H // pool_factor) * (W // pool_factor) 
+
+        multiple = 8
+        padded_H = H + (multiple - H % multiple) % multiple
+        padded_W = W + (multiple - W % multiple) % multiple
+
+        S = (padded_H // pool_factor) * (padded_W // pool_factor)
         
         exp_dim = emb_dim * 2 
         
