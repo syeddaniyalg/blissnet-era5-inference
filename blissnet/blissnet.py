@@ -260,7 +260,7 @@ class CrossAttention(nn.Module):
         super().__init__()
 
         self.num_heads = num_heads
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = dropout
         self.q_w = nn.Linear(emb_dim, emb_dim)
         self.kv_w = nn.Linear(emb_dim, emb_dim * 2)
         self.projection = nn.Linear(emb_dim, emb_dim)
