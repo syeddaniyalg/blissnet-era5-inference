@@ -123,10 +123,10 @@ class AttentionUNet(nn.Module):
 
         self.conv3 = nn.Conv2d(c1*2, c1, kernel_size=3, stride=1, padding=1)
         self.dec1 = nn.Sequential(
-            nn.ConvTranspose2d(c1, in_channels, kernel_size=2, stride=2),
+            nn.ConvTranspose2d(c1, base_channels, kernel_size=2, stride=2),
         )
 
-        self.conv4 = nn.Conv2d(in_channels*2, in_channels, kernel_size=3, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(base_channels + in_channels, base_channels, kernel_size=3, stride=1, padding=1)
         
 
     def forward(self, x):
@@ -297,7 +297,7 @@ class BranchNet1(nn.Module):
 
         self.att_unet = AttentionUNet(in_channels, base_channels, n_heads, n_groups, dropout)
         self.pool = nn.AvgPool2d(pool_factor)
-        self.linear_proj = nn.Linear(in_channels, emb_dim)
+        self.linear_proj = nn.Linear(base_channels, emb_dim)
 
         self.transformer_blocks = nn.Sequential(
             *[Transformer(emb_dim, n_heads, dropout) for _ in range(n_transformer_layers)]
@@ -362,8 +362,8 @@ class BranchNet2(nn.Module):
         self.K = K
 
     def generate_grid(self, length):
-        vec_a = torch.linspace(0, 1, length)
-        vec_b = torch.linspace(0, 1, length)
+        vec_a = torch.linspace(-1, 1, length)
+        vec_b = torch.linspace(-1, 1, length)
 
         grid = torch.stack([vec_a, vec_b], dim=-1)
         return grid
@@ -416,8 +416,8 @@ class BLISSNet(nn.Module):
             self.branch2 = BranchNet2(self.branch1.transformer_blocks, self.branch1.mlp_decoder, config.grid_size, self.emb_dim, self.n_heads, self.dropout, self.K)
 
     def generate_grid(self, height, width, device=None):
-        vec_a = torch.linspace(0, 1, height).to(device)
-        vec_b = torch.linspace(0, 1, width).to(device)
+        vec_a = torch.linspace(-1, 1, height).to(device)
+        vec_b = torch.linspace(-1, 1, width).to(device)
 
         grid_x, grid_y = torch.meshgrid(vec_a, vec_b, indexing='ij')
         grid = torch.stack([grid_x, grid_y], dim=-1)
