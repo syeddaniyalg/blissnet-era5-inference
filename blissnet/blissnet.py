@@ -124,6 +124,8 @@ class AttentionUNet(nn.Module):
         self.conv3 = nn.Conv2d(c1*2, c1, kernel_size=3, stride=1, padding=1)
         self.dec1 = nn.Sequential(
             nn.ConvTranspose2d(c1, base_channels, kernel_size=2, stride=2),
+            nn.GroupNorm(n_groups, base_channels),
+            nn.GELU()
         )
 
         self.conv4 = nn.Conv2d(base_channels + in_channels, base_channels, kernel_size=3, stride=1, padding=1)
@@ -230,7 +232,7 @@ class SIREN(nn.Module):
 
         self.model = nn.Sequential(
             SineLayer(2, hidden_dim, omega, first_layer=True),
-            *[SineLayer(hidden_dim, hidden_dim, 1) for _ in range(n_layers)],
+            *[SineLayer(hidden_dim, hidden_dim, omega) for _ in range(n_layers)],
             nn.Linear(hidden_dim, out_K)
         )
 
