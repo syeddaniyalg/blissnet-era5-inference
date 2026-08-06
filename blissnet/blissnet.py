@@ -299,7 +299,14 @@ class BranchNet1(nn.Module):
 
         self.att_unet = AttentionUNet(in_channels, base_channels, n_heads, n_groups, dropout)
         self.target_H, self.target_W = 16, 8 
-        self.pool = nn.AdaptiveAvgPool2d((self.target_H, self.target_W))
+        self.pool_factor = pool_factor
+
+        # 1. Natural, proportional downsampling (replaces AdaptiveAvgPool2d)
+        self.pool = nn.Sequential(
+            nn.Conv2d(base_channels, base_channels, kernel_size=pool_factor, stride=pool_factor),
+            nn.GroupNorm(n_groups, base_channels),
+            nn.GELU()
+        )
         
         self.linear_proj = nn.Linear(base_channels, emb_dim)
 
@@ -307,15 +314,20 @@ class BranchNet1(nn.Module):
             *[Transformer(emb_dim, n_heads, dropout) for _ in range(n_transformer_layers)]
         )
 
-        S = self.target_H * self.target_W 
+        multiple = 8
+        padded_H = H + (multiple - H % multiple) % multiple
+        padded_W = W + (multiple - W % multiple) % multiple
+
+        # 2. Let S be determined naturally by the un-warped aspect ratio!
+        S = (padded_H // pool_factor) * (padded_W // pool_factor)
         self.pos_embedding = nn.Parameter(torch.randn(1, S, emb_dim) * 0.02)
         
         exp_dim = emb_dim * 2 
         
-        # 3. Remove the 64-dim bottleneck. Flatten the full 512-D features.
+        # 3. Keep the pure 512-D features flattened directly into the MLP
         self.mlp_decoder = nn.Sequential(
             nn.Flatten(start_dim=1),       
-            nn.Linear(S * emb_dim, exp_dim), # 128 * 512 = 65536 features      
+            nn.Linear(S * emb_dim, exp_dim), 
             nn.SiLU(),
             *[nn.Sequential(nn.Linear(exp_dim, exp_dim), nn.SiLU()) for _ in range(n_hidden_linear_layers - 1)],
             nn.Linear(exp_dim, K)
