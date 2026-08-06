@@ -272,10 +272,10 @@ class CrossAttention(nn.Module):
         H = self.num_heads
         head_size = int(emb_dim / H)
 
-        Q = self.q_w(x).reshape(B, S_A, H, head_size) # B, S_A, H, head_size
+        Q = self.q_w(x).reshape(B, S_A, H, head_size).permute(0, 2, 1, 3)  # B,H,S_A,head_size  <-- fix
 
         kv = self.kv_w(y).reshape(B, S_B, H, 2, head_size)
-        K, V = kv.unbind(dim=-2) # B, S_B, H, head_size
+        K, V = kv.unbind(dim=-2)
         K = K.permute(0, 2, 1, 3)   # B,H,S_B,head_size
         V = V.permute(0, 2, 1, 3)
 
