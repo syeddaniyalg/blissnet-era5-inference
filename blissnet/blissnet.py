@@ -292,11 +292,13 @@ class BranchNet1(nn.Module):
     def __init__(self, emb_dim, K, in_channels, base_channels, n_heads, n_groups, dropout=0.1, n_transformer_layers=4, n_hidden_linear_layers=3, pool_factor=4):
         super().__init__()
 
+        self.K = K
+        self.pool_factor = pool_factor
+
         self.att_unet = AttentionUNet(in_channels, base_channels, n_heads, n_groups, dropout)
         self.pool = nn.AvgPool2d(pool_factor)
         self.linear_proj = nn.Linear(in_channels, emb_dim)
 
-        self.cls_token = nn.Parameter(torch.randn((1, 1, emb_dim)))
         self.decoder = nn.Sequential(
             *[Transformer(emb_dim, n_heads, dropout) for _ in range(n_transformer_layers)],
             nn.Linear(emb_dim, emb_dim * 4),
@@ -305,6 +307,20 @@ class BranchNet1(nn.Module):
             nn.Linear(emb_dim*4, K)
         )
 
+        n_stages = int(math.log2(pool_factor))
+        up_layers = []
+        ch = K
+        for _ in range(n_stages):
+            up_layers += [
+                nn.ConvTranspose2d(ch, ch, kernel_size=2, stride=2),
+                nn.GroupNorm(1, ch),
+                nn.GELU(),
+            ]
+        self.upsample = nn.Sequential(*up_layers)
+
+        self.coeff_query = nn.Parameter(torch.randn(1, 1, K) * 0.02)
+        self.coeff_pool = CrossAttention(K, n_heads, dropout)
+
     def forward(self, x):
         B, C, H, W = x.shape
         output = self.att_unet(x)
@@ -312,12 +328,20 @@ class BranchNet1(nn.Module):
         Hp, Wp = output.shape[-2:]                  
         output = output.reshape(B, C, Hp*Wp).permute(0, 2, 1)
         embedded_out = self.linear_proj(output) # B, S, emb_dim
-        cls_expanded = self.cls_token.expand(embedded_out.shape[0], -1, -1)
-        output = torch.cat([cls_expanded, embedded_out], dim=1)
+        output = embedded_out
         for layer in self.decoder:
             output = checkpoint(layer, output, use_reentrant=False)
-    
-        return output, embedded_out
+
+        coeff_map = output.permute(0, 2, 1).reshape(B, self.K, Hp, Wp)
+        coeff_map = self.upsample(coeff_map)
+        if coeff_map.shape[-2:] != (H, W):
+            coeff_map = F.interpolate(coeff_map, size=(H, W), mode='nearest')
+
+        coeff_seq = coeff_map.reshape(B, self.K, H*W).permute(0, 2, 1)
+        query = self.coeff_query.expand(B, -1, -1)
+        coefficients = self.coeff_pool(query, coeff_seq).squeeze(1)
+
+        return coefficients, embedded_out
 
 class FourierFeatureTransform(nn.Module):
     def __init__(self, feature_size, sigma=1):
@@ -332,7 +356,7 @@ class FourierFeatureTransform(nn.Module):
 
 
 class BranchNet2(nn.Module):
-    def __init__(self, cls_token:nn.Parameter, frozen_decoder:nn.Module, grid_resolution, emb_dim, n_heads, dropout=0.1):
+    def __init__(self, frozen_decoder:nn.Module, grid_resolution, emb_dim, n_heads, dropout=0.1, K=None):
         super().__init__()
 
         grid_tensor = self.generate_grid(grid_resolution) # res, 2
@@ -342,8 +366,11 @@ class BranchNet2(nn.Module):
 
         self.transformer_encoder = TransformerEncoder(emb_dim, n_heads, dropout)
         self.cross_att = CrossAttention(emb_dim, n_heads, dropout)
-        self.cls_token = cls_token
         self.decoder = frozen_decoder
+
+        self.K = K
+        self.coeff_query = nn.Parameter(torch.randn(1, 1, K) * 0.02)
+        self.coeff_pool = CrossAttention(K, n_heads, dropout)
 
     def generate_grid(self, length):
         vec_a = torch.linspace(0, 1, length)
@@ -359,12 +386,15 @@ class BranchNet2(nn.Module):
         fourier_map = fourier_map.expand(input_emb.shape[0], -1, -1)
 
         emb_output = self.cross_att(fourier_map, input_emb)
-        cls_expanded = self.cls_token.expand(emb_output.shape[0], -1, -1)
-        output = torch.cat([cls_expanded, emb_output], dim=1)
+        output = emb_output
         for layer in self.decoder:
             output = checkpoint(layer, output, use_reentrant=False)
-        dec = output
-        return dec, emb_output
+
+        B = output.shape[0]
+        query = self.coeff_query.expand(B, -1, -1)
+        coefficients = self.coeff_pool(query, output).squeeze(1)
+
+        return coefficients, emb_output
     
 class BLISSNet(nn.Module):
     def __init__(self, emb_dim, K, n_heads, dropout=0.1):
@@ -395,7 +425,7 @@ class BLISSNet(nn.Module):
             self.branch1.eval()
             self.trunk_net.eval()
 
-            self.branch2 = BranchNet2(self.branch1.cls_token, self.branch1.decoder, config.grid_size, self.emb_dim, self.n_heads, self.dropout)
+            self.branch2 = BranchNet2(self.branch1.decoder, config.grid_size, self.emb_dim, self.n_heads, self.dropout, self.K)
 
     def generate_grid(self, height, width, device=None):
         vec_a = torch.linspace(0, 1, height).to(device)
@@ -407,26 +437,18 @@ class BLISSNet(nn.Module):
         return grid
     
     def forward(self, x, resolution, phase=0):
-        output = None
-        device = None
+        H, W = resolution
+        device = x.device if phase == 0 else x[0].device
+
+        grid = self.generate_grid(H, W, device).unsqueeze(0)
+        basis = self.trunk_net(grid)
+
         if phase == 0:
-            device = x.device
-            x_grid = x
-            coefficients, embedded_output = self.branch1(x_grid)
-            coefficients = coefficients[:, :1, :]
+            coefficients, embedded_output = self.branch1(x)
         else:
             x_vals, coords = x
-            device = x_vals.device
-            coefficients, embedded_output = self.branch2(x_vals, coords) 
-            coefficients = coefficients[:, :1, :]
+            coefficients, embedded_output = self.branch2(x_vals, coords)
 
-        H, W = resolution
-        grid = self.generate_grid(H, W, device).unsqueeze(0) # 1, H, W, 2
-        
-        basis = self.trunk_net(grid) # 1, H, W, K
-        coefficients:torch.Tensor = coefficients.permute(0, 2, 1).unsqueeze(1) # B, 1, K, 1
-
-        output = basis @ coefficients # B, H, W, 1
+        coeff = coefficients.reshape(coefficients.shape[0], 1, 1, self.K)
+        output = (basis * coeff).sum(dim=-1, keepdim=True)
         return output.permute(0, 3, 1, 2), coefficients, embedded_output
-
-
