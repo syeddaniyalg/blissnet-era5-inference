@@ -308,6 +308,7 @@ class BranchNet1(nn.Module):
         padded_W = W + (multiple - W % multiple) % multiple
 
         S = (padded_H // pool_factor) * (padded_W // pool_factor)
+        self.pos_embedding = nn.Parameter(torch.randn(1, S, emb_dim) * 0.02)
         
         exp_dim = emb_dim * 2 
         
@@ -327,7 +328,7 @@ class BranchNet1(nn.Module):
         B, C_out, Hp, Wp = output.shape                  
         output = output.reshape(B, C_out, Hp*Wp).permute(0, 2, 1)
         embedded_out = self.linear_proj(output) # B, S, emb_dim
-        output = embedded_out
+        output = embedded_out + self.pos_embedding
         for layer in self.transformer_blocks:
             output = checkpoint(layer, output, use_reentrant=False)
             
@@ -347,7 +348,7 @@ class FourierFeatureTransform(nn.Module):
 
 
 class BranchNet2(nn.Module):
-    def __init__(self, frozen_transformer:nn.Module, frozen_mlp:nn.Module, grid_resolution, emb_dim, n_heads, dropout=0.1, K=None):
+    def __init__(self, frozen_transformer:nn.Module, frozen_mlp:nn.Module, frozen_pos_emb:nn.Parameter, grid_resolution, emb_dim, n_heads, dropout=0.1, K=None):
         super().__init__()
 
         grid_tensor = self.generate_grid(grid_resolution) # res, 2
@@ -359,6 +360,7 @@ class BranchNet2(nn.Module):
         self.cross_att = CrossAttention(emb_dim, n_heads, dropout)
         self.transformer_blocks = frozen_transformer
         self.mlp_decoder = frozen_mlp
+        self.pos_emb = frozen_pos_emb
         self.K = K
 
     def generate_grid(self, length):
@@ -375,7 +377,7 @@ class BranchNet2(nn.Module):
         fourier_map = fourier_map.expand(input_emb.shape[0], -1, -1)
 
         emb_output = self.cross_att(fourier_map, input_emb)
-        output = emb_output
+        output = emb_output + self.pos_emb
         for layer in self.transformer_blocks:
             output = checkpoint(layer, output, use_reentrant=False)
             
@@ -413,7 +415,7 @@ class BLISSNet(nn.Module):
             self.branch1.eval()
             self.trunk_net.eval()
 
-            self.branch2 = BranchNet2(self.branch1.transformer_blocks, self.branch1.mlp_decoder, config.grid_size, self.emb_dim, self.n_heads, self.dropout, self.K)
+            self.branch2 = BranchNet2(self.branch1.transformer_blocks, self.branch1.mlp_decoder, self.branch1.pos_embedding, config.grid_size, self.emb_dim, self.n_heads, self.dropout, self.K)
 
     def generate_grid(self, height, width, device=None):
         vec_a = torch.linspace(-1, 1, height).to(device)
