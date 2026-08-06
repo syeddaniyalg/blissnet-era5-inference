@@ -2,38 +2,38 @@ import torch.nn as nn
 import torch
 import math
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 class MHA(nn.Module):
     def __init__(self, emb_dim, num_heads, dropout=0.1, two_dim=False):
         super().__init__()
-
         self.num_heads = num_heads
-        self.dropout = nn.Dropout(dropout)
+        self.dropout_p = dropout
         self.weights = nn.Linear(emb_dim, emb_dim * 3)
         self.projection = nn.Linear(emb_dim, emb_dim)
-
         self.two_dim = two_dim
 
     def forward(self, x):
         if self.two_dim:
             B, emb_dim, height, width = x.shape
             x = x.reshape(B, emb_dim, height*width).permute(0, 2, 1)
-        
+
         B, S, emb_dim = x.shape
         H = self.num_heads
         head_size = int(emb_dim / H)
 
         qkv = self.weights(x).reshape(B, S, H, 3, head_size)
-        Q, K, V = qkv.unbind(dim=-2) # B, S, H, head_size
+        Q, K, V = qkv.unbind(dim=-2)          # B, S, H, head_size
+        Q, K, V = (t.permute(0, 2, 1, 3) for t in (Q, K, V))   # B, H, S, head_size
 
-        attention = (Q.permute(0, 2, 1, 3) @ K.permute(0, 2, 3, 1)) / (head_size ** 0.5)
-        attention_score = torch.softmax(attention, dim=-1) 
-        attention_score = self.dropout(attention_score) 
+        output = F.scaled_dot_product_attention(
+            Q, K, V,
+            dropout_p=self.dropout_p if self.training else 0.0
+        )  # B, H, S, head_size
 
-        output = (attention_score @ V.permute(0, 2, 1, 3)).permute(0, 2, 1, 3)
-        output = output.reshape(B, S, emb_dim)
+        output = output.permute(0, 2, 1, 3).reshape(B, S, emb_dim)
         output = self.projection(output)
-        if self.two_dim: 
+        if self.two_dim:
             output = output.permute(0, 2, 1).reshape(B, emb_dim, height, width)
         return output
 
@@ -287,10 +287,11 @@ class CrossAttention(nn.Module):
         return output
 
 class BranchNet1(nn.Module):
-    def __init__(self, emb_dim, K, in_channels, base_channels, n_heads, n_groups, dropout=0.1, n_transformer_layers=4, n_hidden_linear_layers=3):
+    def __init__(self, emb_dim, K, in_channels, base_channels, n_heads, n_groups, dropout=0.1, n_transformer_layers=4, n_hidden_linear_layers=3, pool_factor=4):
         super().__init__()
 
         self.att_unet = AttentionUNet(in_channels, base_channels, n_heads, n_groups, dropout)
+        self.pool = nn.AvgPool2d(pool_factor)
         self.linear_proj = nn.Linear(in_channels, emb_dim)
 
         self.cls_token = nn.Parameter(torch.randn((1, 1, emb_dim)))
@@ -305,11 +306,13 @@ class BranchNet1(nn.Module):
     def forward(self, x):
         B, C, H, W = x.shape
         output = self.att_unet(x)
+        output = self.pool(output)
         output = output.reshape(B, C, H*W).permute(0, 2, 1)
         embedded_out = self.linear_proj(output) # B, S, emb_dim
         cls_expanded = self.cls_token.expand(embedded_out.shape[0], -1, -1)
         output = torch.cat([cls_expanded, embedded_out], dim=1)
-        output = self.decoder(output)
+        for layer in self.decoder:
+            output = checkpoint(layer, output, use_reentrant=False)
 
         return output, embedded_out
 
@@ -355,7 +358,8 @@ class BranchNet2(nn.Module):
         emb_output = self.cross_att(fourier_map, input_emb)
         cls_expanded = self.cls_token.expand(emb_output.shape[0], -1, -1)
         output = torch.cat([cls_expanded, emb_output], dim=1)
-        dec = self.decoder(output)
+        for layer in self.decoder:
+            dec = checkpoint(layer, output, use_reentrant=False)
 
         return dec, emb_output
     
