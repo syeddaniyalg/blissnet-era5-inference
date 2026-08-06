@@ -298,7 +298,11 @@ class BranchNet1(nn.Module):
         self.pool_factor = pool_factor
 
         self.att_unet = AttentionUNet(in_channels, base_channels, n_heads, n_groups, dropout)
-        self.pool = nn.AvgPool2d(pool_factor)
+        self.pool = nn.Sequential(
+            nn.Conv2d(base_channels, base_channels, kernel_size=pool_factor, stride=pool_factor),
+            nn.GroupNorm(n_groups, base_channels),
+            nn.GELU()
+        )
         self.linear_proj = nn.Linear(base_channels, emb_dim)
 
         self.transformer_blocks = nn.Sequential(
