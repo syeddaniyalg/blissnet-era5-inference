@@ -229,6 +229,19 @@ class CrossAttention(nn.Module):
         output = self.projection(output)
         return output
 
+class AttentionPool(nn.Module):
+    def __init__(self, emb_dim):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(1, 1, emb_dim) * 0.02)
+        self.attn = CrossAttention(emb_dim, num_heads=8)  # reuse what you already have
+
+    def forward(self, x):
+        # x: B, S, emb_dim
+        B = x.shape[0]
+        q = self.query.expand(B, -1, -1)      # B, 1, emb_dim
+        pooled = self.attn(q, x)               # B, 1, emb_dim
+        return pooled.squeeze(1)               # B, emb_dim
+    
 class BranchNet1(nn.Module):
     def __init__(self, emb_dim, H, W, K, in_channels, base_channels, n_heads, n_groups, dropout=0.1, n_transformer_layers=4, n_hidden_linear_layers=3):
         super().__init__()
@@ -248,6 +261,8 @@ class BranchNet1(nn.Module):
             nn.Linear(emb_dim*4, K)
         )
 
+        self.pool = AttentionPool(emb_dim)
+
 
     def forward(self, x):
         B, C, H, W = x.shape
@@ -255,9 +270,9 @@ class BranchNet1(nn.Module):
         output = emb_out
         for layer in self.transformer_blocks:
             output = checkpoint(layer, output, use_reentrant=False)
-            
-        output:torch.Tensor = self.mlp_decoder(output)
-        output = output.mean(dim=1)
+
+        output = self.pool(output)   
+        output = self.mlp_decoder(output)
         return output, emb_out
 
 class FourierFeatureTransform(nn.Module):
@@ -272,7 +287,7 @@ class FourierFeatureTransform(nn.Module):
         return out
 
 class BranchNet2(nn.Module):
-    def __init__(self, frozen_transformer:nn.Module, frozen_mlp:nn.Module, latent_grid_size, emb_dim, n_heads, dropout=0.1, K=None):
+    def __init__(self, att_pool:nn.Module, frozen_transformer:nn.Module, frozen_mlp:nn.Module, latent_grid_size, emb_dim, n_heads, dropout=0.1, K=None):
         super().__init__()
 
         latent_tensor = self.generate_grid(latent_grid_size) # res, 2
@@ -284,6 +299,7 @@ class BranchNet2(nn.Module):
         self.cross_att = CrossAttention(emb_dim, n_heads, dropout)
         self.transformer_blocks = frozen_transformer
         self.mlp_decoder = frozen_mlp
+        self.pool = att_pool
         self.K = K
 
     def generate_grid(self, length):
@@ -303,9 +319,10 @@ class BranchNet2(nn.Module):
         output = emb_output
         for layer in self.transformer_blocks:
             output = checkpoint(layer, output, use_reentrant=False)
-            
-        coeffs = self.mlp_decoder(output) # Output shape: (B, K)
-        output = output.mean(dim=1)
+
+        coeffs = self.pool(output)
+        coeffs = self.mlp_decoder(coeffs) # Output shape: (B, K)
+        
         return coeffs, emb_output
     
 class BLISSNet(nn.Module):
@@ -339,7 +356,7 @@ class BLISSNet(nn.Module):
             self.branch1.eval()
             self.trunk_net.eval()
 
-            self.branch2 = BranchNet2(self.branch1.transformer_blocks, self.branch1.mlp_decoder, self.branch1.S, self.emb_dim, self.n_heads, self.dropout, self.K)
+            self.branch2 = BranchNet2(self.branch1.pool, self.branch1.transformer_blocks, self.branch1.mlp_decoder, self.branch1.S, self.emb_dim, self.n_heads, self.dropout, self.K)
 
     def generate_grid(self, height, width, device=None):
         vec_a = torch.linspace(-1, 1, height).to(device)
