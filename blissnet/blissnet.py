@@ -99,7 +99,7 @@ class AttentionUNet(nn.Module):
         enc = self.encoder(x)
         B, emb_dim, height, width = enc.shape
         enc = enc.reshape(B, emb_dim, height*width).permute(0, 2, 1)
-        out = self.mha(out) # B, S, emb_dim
+        out = self.mha(enc) # B, S, emb_dim
         return out
 
 
