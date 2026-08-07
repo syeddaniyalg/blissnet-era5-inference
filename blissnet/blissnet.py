@@ -173,7 +173,7 @@ class SIREN(nn.Module):
 
         self.model = nn.Sequential(
             SineLayer(2, hidden_dim, omega, first_layer=True),
-            *[SineLayer(hidden_dim, hidden_dim, omega) for _ in range(n_layers)],
+            *[SineLayer(hidden_dim, hidden_dim, 1) for _ in range(n_layers)],
             nn.Linear(hidden_dim, out_K)
         )
 
