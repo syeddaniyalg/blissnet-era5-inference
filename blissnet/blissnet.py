@@ -173,7 +173,7 @@ class SIREN(nn.Module):
 
         self.model = nn.Sequential(
             SineLayer(2, hidden_dim, omega, first_layer=True),
-            *[SineLayer(hidden_dim, hidden_dim, 1) for _ in range(n_layers)],
+            *[SineLayer(hidden_dim, hidden_dim, omega) for _ in range(n_layers)],
             nn.Linear(hidden_dim, out_K)
         )
 
@@ -230,7 +230,7 @@ class CrossAttention(nn.Module):
         return output
 
 class BranchNet1(nn.Module):
-    def __init__(self, emb_dim, H, W, K, in_channels, base_channels, n_heads, n_groups, dropout=0.1, n_transformer_layers=4, n_hidden_linear_layers=39):
+    def __init__(self, emb_dim, H, W, K, in_channels, base_channels, n_heads, n_groups, dropout=0.1, n_transformer_layers=4, n_hidden_linear_layers=3):
         super().__init__()
 
         self.K = K
