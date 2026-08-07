@@ -5,19 +5,14 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 class MHA(nn.Module):
-    def __init__(self, emb_dim, num_heads, dropout=0.1, two_dim=False):
+    def __init__(self, emb_dim, num_heads, dropout=0.1):
         super().__init__()
         self.num_heads = num_heads
         self.dropout_p = dropout
         self.weights = nn.Linear(emb_dim, emb_dim * 3)
         self.projection = nn.Linear(emb_dim, emb_dim)
-        self.two_dim = two_dim
-
+     
     def forward(self, x):
-        if self.two_dim:
-            B, emb_dim, height, width = x.shape
-            x = x.reshape(B, emb_dim, height*width).permute(0, 2, 1)
-
         B, S, emb_dim = x.shape
         H = self.num_heads
         head_size = int(emb_dim / H)
@@ -33,8 +28,6 @@ class MHA(nn.Module):
 
         output = output.permute(0, 2, 1, 3).reshape(B, S, emb_dim)
         output = self.projection(output)
-        if self.two_dim:
-            output = output.permute(0, 2, 1).reshape(B, emb_dim, height, width)
         return output
 
 class ResidualBlock(nn.Module):
@@ -79,87 +72,35 @@ class AttentionUNet(nn.Module):
 
         c1, c2, c3, c4 = base_channels, base_channels*2, base_channels*4, base_channels*8
 
-        self.enc1 = nn.Sequential(
+        self.encoder = nn.Sequential(
             nn.Conv2d(in_channels, c1, kernel_size=3, stride=1, padding=1),
             nn.GroupNorm(n_groups, c1),
             nn.GELU(),
-            nn.MaxPool2d(2)
+            nn.MaxPool2d(2),
             
-        )
-
-        self.enc2 = nn.Sequential(
             nn.Conv2d(c1, c2, kernel_size=3, stride=1, padding=1),
             nn.GroupNorm(n_groups, c2),
             nn.GELU(),
-            nn.MaxPool2d(2)
-        )
-        
-        self.enc3 = nn.Sequential(
+            nn.MaxPool2d(2),
+       
             nn.Conv2d(c2, c3, kernel_size=3, stride=1, padding=1),
             nn.GroupNorm(n_groups, c3),
             nn.GELU(),
-            nn.MaxPool2d(2)
-        )
-        
-        self.bn = nn.Sequential(
+            nn.MaxPool2d(2),
+
             ResidualBlock(c3, c4, n_groups, dropout),
             nn.GroupNorm(1, c4),
-            MHA(c4, n_heads, dropout, two_dim=True),
-            ResidualBlock(c4, c3, n_groups, dropout)
         )
 
-        self.dec3 = nn.Sequential(
-            nn.ConvTranspose2d(c3, c2, kernel_size=2, stride=2),
-            nn.GroupNorm(n_groups, c2),
-            nn.GELU()
-        )
-
-        self.conv2 = nn.Conv2d(c2*2, c2, kernel_size=3, stride=1, padding=1)
-        self.dec2 = nn.Sequential(
-            nn.ConvTranspose2d(c2, c1, kernel_size=2, stride=2),
-            nn.GroupNorm(n_groups, c1),
-            nn.GELU()
-        )
-
-        self.conv3 = nn.Conv2d(c1*2, c1, kernel_size=3, stride=1, padding=1)
-        self.dec1 = nn.Sequential(
-            nn.ConvTranspose2d(c1, base_channels, kernel_size=2, stride=2),
-            nn.GroupNorm(n_groups, base_channels),
-            nn.GELU()
-        )
-
-        self.conv4 = nn.Conv2d(base_channels + in_channels, base_channels, kernel_size=3, stride=1, padding=1)
+        self.mha = MHA(c4, n_heads, dropout)
         
 
     def forward(self, x):
-        res1 = x.clone()
-
-        res2 = self.enc1(res1)
-        res3 = self.enc2(res2)
-        out_enc = self.enc3(res3)
-
-        bn_out = self.bn(out_enc)
-
-        out1 = self.dec3(bn_out)
-        if out1.shape[-2:] != res3.shape[-2:]:
-            out1 = F.interpolate(out1, size=res3.shape[-2:], mode='nearest')
-
-        out2 = torch.cat([out1, res3], dim=1)
-        out2 = self.conv2(out2)
-        out2 = self.dec2(out2)
-
-        if out2.shape[-2:] != res2.shape[-2:]:
-            out2 = F.interpolate(out2, size=res2.shape[-2:], mode='nearest')
-        out3 = torch.cat([out2, res2], dim=1)
-        out3 = self.conv3(out3)
-        out3 = self.dec1(out3)
-
-        if out3.shape[-2:] != res1.shape[-2:]:
-            out3 = F.interpolate(out3, size=res1.shape[-2:], mode='nearest')
-        out4 = torch.cat([out3, res1], dim=1)
-        out4 = self.conv4(out4)
-
-        return out4
+        enc = self.encoder(x)
+        B, emb_dim, height, width = enc.shape
+        enc = enc.reshape(B, emb_dim, height*width).permute(0, 2, 1)
+        out = self.mha(out) # B, S, emb_dim
+        return out
 
 
 class FFN(nn.Module):
@@ -239,8 +180,6 @@ class SIREN(nn.Module):
     def forward(self, x):
         return self.model(x)
 
-
-
 class TransformerEncoder(nn.Module):
     def __init__(self, emb_dim, n_heads, dropout):
         super().__init__()
@@ -291,61 +230,35 @@ class CrossAttention(nn.Module):
         return output
 
 class BranchNet1(nn.Module):
-    def __init__(self, emb_dim, H, W, K, in_channels, base_channels, n_heads, n_groups, dropout=0.1, n_transformer_layers=4, n_hidden_linear_layers=3, pool_factor=4):
+    def __init__(self, emb_dim, H, W, K, in_channels, base_channels, n_heads, n_groups, dropout=0.1, n_transformer_layers=4, n_hidden_linear_layers=39):
         super().__init__()
 
         self.K = K
-        self.pool_factor = pool_factor
-
+        self.S = (H // 8) * (W // 8)
         self.att_unet = AttentionUNet(in_channels, base_channels, n_heads, n_groups, dropout)
-        self.target_H, self.target_W = 16, 8 
-        self.pool_factor = pool_factor
-
-        # 1. Natural, proportional downsampling (replaces AdaptiveAvgPool2d)
-        self.pool = nn.Sequential(
-            nn.Conv2d(base_channels, base_channels, kernel_size=pool_factor, stride=pool_factor),
-            nn.GroupNorm(n_groups, base_channels),
-            nn.GELU()
-        )
-        
-        self.linear_proj = nn.Linear(base_channels, emb_dim)
-
+       
         self.transformer_blocks = nn.Sequential(
-            *[Transformer(emb_dim, n_heads, dropout) for _ in range(n_transformer_layers)]
+            *[Transformer(emb_dim, n_heads, dropout) for _ in range(n_transformer_layers)],
         )
 
-        multiple = 8
-        padded_H = H + (multiple - H % multiple) % multiple
-        padded_W = W + (multiple - W % multiple) % multiple
-
-        # 2. Let S be determined naturally by the un-warped aspect ratio!
-        S = (padded_H // pool_factor) * (padded_W // pool_factor)
-        self.pos_embedding = nn.Parameter(torch.randn(1, S, emb_dim) * 0.02)
-        
-        exp_dim = emb_dim * 2 
-        
-        # 3. Keep the pure 512-D features flattened directly into the MLP
         self.mlp_decoder = nn.Sequential(
-            nn.Flatten(start_dim=1),       
-            nn.Linear(S * emb_dim, exp_dim), 
+            nn.Linear(emb_dim, emb_dim * 4), 
             nn.SiLU(),
-            *[nn.Sequential(nn.Linear(exp_dim, exp_dim), nn.SiLU()) for _ in range(n_hidden_linear_layers - 1)],
-            nn.Linear(exp_dim, K)
+            *[nn.Sequential(nn.Linear(emb_dim * 4, emb_dim * 4), nn.SiLU()) for _ in range(n_hidden_linear_layers - 1)],
+            nn.Flatten(start_dim=1), # it gives (B, S*emb_dim*4)
+            nn.Linear(self.S*emb_dim*4, K)
         )
+
 
     def forward(self, x):
         B, C, H, W = x.shape
-        output = self.att_unet(x)
-        output = self.pool(output)
-        B, C_out, Hp, Wp = output.shape                  
-        output = output.reshape(B, C_out, Hp*Wp).permute(0, 2, 1)
-        embedded_out = self.linear_proj(output) # B, S, emb_dim
-        output = embedded_out + self.pos_embedding
+        emb_out = self.att_unet(x) # B, S, emb_dim
+        output = emb_out
         for layer in self.transformer_blocks:
             output = checkpoint(layer, output, use_reentrant=False)
             
-        coeffs = self.mlp_decoder(output) # Output shape: (B, K)
-        return coeffs, embedded_out
+        output = self.mlp_decoder(output)
+        return output, emb_out
 
 class FourierFeatureTransform(nn.Module):
     def __init__(self, feature_size, sigma=1):
@@ -358,13 +271,12 @@ class FourierFeatureTransform(nn.Module):
         out = torch.cat([torch.sin(proj), torch.cos(proj)], dim=-1)
         return out
 
-
 class BranchNet2(nn.Module):
-    def __init__(self, frozen_transformer:nn.Module, frozen_mlp:nn.Module, frozen_pos_emb:nn.Parameter, grid_resolution, emb_dim, n_heads, dropout=0.1, K=None):
+    def __init__(self, frozen_transformer:nn.Module, frozen_mlp:nn.Module, latent_grid_size, emb_dim, n_heads, dropout=0.1, K=None):
         super().__init__()
 
-        grid_tensor = self.generate_grid(grid_resolution) # res, 2
-        self.register_buffer('fixed_grid', grid_tensor)
+        latent_tensor = self.generate_grid(latent_grid_size) # res, 2
+        self.register_buffer('fixed_latent_grid', latent_tensor)
 
         self.fourier_feature_transform = FourierFeatureTransform(emb_dim, 1)
 
@@ -372,7 +284,6 @@ class BranchNet2(nn.Module):
         self.cross_att = CrossAttention(emb_dim, n_heads, dropout)
         self.transformer_blocks = frozen_transformer
         self.mlp_decoder = frozen_mlp
-        self.pos_emb = frozen_pos_emb
         self.K = K
 
     def generate_grid(self, length):
@@ -385,11 +296,11 @@ class BranchNet2(nn.Module):
     def forward(self, x, coord):
         input_emb = self.transformer_encoder(x, coord)
 
-        fourier_map = self.fourier_feature_transform(self.fixed_grid)
+        fourier_map = self.fourier_feature_transform(self.fixed_latent_grid)
         fourier_map = fourier_map.expand(input_emb.shape[0], -1, -1)
 
         emb_output = self.cross_att(fourier_map, input_emb)
-        output = emb_output + self.pos_emb
+        output = emb_output
         for layer in self.transformer_blocks:
             output = checkpoint(layer, output, use_reentrant=False)
             
@@ -414,7 +325,7 @@ class BLISSNet(nn.Module):
         
         self.phase = phase
         if phase == 0:
-            self.branch1 = BranchNet1(self.emb_dim, self.H, self.W, self.K, config.in_channels, config.base_channels, self.n_heads, config.n_groups, self.dropout, config.n_transformer_layers, config.n_hidden_linear_layers, config.pool_factor)
+            self.branch1 = BranchNet1(self.emb_dim, self.H, self.W, self.K, config.in_channels, config.base_channels, self.n_heads, config.n_groups, self.dropout, config.n_transformer_layers, config.n_hidden_linear_layers)
 
             self.trunk_net = SIREN(config.siren_hidden_dim, config.siren_layers, self.K, config.omega)
         else:
@@ -427,7 +338,7 @@ class BLISSNet(nn.Module):
             self.branch1.eval()
             self.trunk_net.eval()
 
-            self.branch2 = BranchNet2(self.branch1.transformer_blocks, self.branch1.mlp_decoder, self.branch1.pos_embedding, config.grid_size, self.emb_dim, self.n_heads, self.dropout, self.K)
+            self.branch2 = BranchNet2(self.branch1.transformer_blocks, self.branch1.mlp_decoder, self.branch1.S, self.emb_dim, self.n_heads, self.dropout, self.K)
 
     def generate_grid(self, height, width, device=None):
         vec_a = torch.linspace(-1, 1, height).to(device)
@@ -446,13 +357,12 @@ class BLISSNet(nn.Module):
         basis = self.trunk_net(grid) # 1, H, W, K
 
         if phase == 0:
-            coeff_map, embedded_output = self.branch1(x) # B, K
+            coeffs, embedded_output = self.branch1(x) # B, K
         else:
             x_vals, coords = x
-            coeff_map, embedded_output = self.branch2(x_vals, coords) # B, K
+            coeffs, embedded_output = self.branch2(x_vals, coords) # B, K
 
-        coeffs = coeff_map.view(-1, 1, 1, self.K) 
-    
-        output = (basis * coeffs).sum(dim=-1, keepdim=True)
+        B, K = coeffs.shape
+        output = (coeffs @ basis.reshape(H*W, K).T).reshape(B, H, W, 1)
 
-        return output.permute(0, 3, 1, 2), coeff_map, embedded_output
+        return output.permute(0, 3, 1, 2), coeffs, embedded_output
