@@ -126,7 +126,7 @@ class Transformer(nn.Module):
 
         self.attention_block = nn.Sequential(
             nn.LayerNorm(emb_dim),
-            MHA(emb_dim, n_heads, dropout, two_dim=False)
+            MHA(emb_dim, n_heads, dropout)
         )
 
         self.ffn = nn.Sequential(
