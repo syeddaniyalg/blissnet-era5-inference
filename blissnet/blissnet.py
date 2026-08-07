@@ -245,8 +245,7 @@ class BranchNet1(nn.Module):
             nn.Linear(emb_dim, emb_dim * 4), 
             nn.SiLU(),
             *[nn.Sequential(nn.Linear(emb_dim * 4, emb_dim * 4), nn.SiLU()) for _ in range(n_hidden_linear_layers - 1)],
-            nn.Flatten(start_dim=1), # it gives (B, S*emb_dim*4)
-            nn.Linear(self.S*emb_dim*4, K)
+            nn.Linear(emb_dim*4, K)
         )
 
 
@@ -257,7 +256,8 @@ class BranchNet1(nn.Module):
         for layer in self.transformer_blocks:
             output = checkpoint(layer, output, use_reentrant=False)
             
-        output = self.mlp_decoder(output)
+        output:torch.Tensor = self.mlp_decoder(output)
+        output = output.mean(dim=1)
         return output, emb_out
 
 class FourierFeatureTransform(nn.Module):
@@ -305,6 +305,7 @@ class BranchNet2(nn.Module):
             output = checkpoint(layer, output, use_reentrant=False)
             
         coeffs = self.mlp_decoder(output) # Output shape: (B, K)
+        output = output.mean(dim=1)
         return coeffs, emb_output
     
 class BLISSNet(nn.Module):
