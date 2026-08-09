@@ -99,7 +99,7 @@ class AttentionUNet(nn.Module):
         enc = self.encoder(x)
         B, emb_dim, height, width = enc.shape
         enc = enc.reshape(B, emb_dim, height*width).permute(0, 2, 1)
-        out = self.mha(enc) # B, S, emb_dim
+        out = self.mha(enc) 
         return out
 
 
@@ -213,7 +213,7 @@ class CrossAttention(nn.Module):
         H = self.num_heads
         head_size = int(emb_dim / H)
 
-        Q = self.q_w(x).reshape(B, S_A, H, head_size).permute(0, 2, 1, 3)  # B,H,S_A,head_size  <-- fix
+        Q = self.q_w(x).reshape(B, S_A, H, head_size).permute(0, 2, 1, 3)  # B,H,S_A,head_size 
 
         kv = self.kv_w(y).reshape(B, S_B, H, 2, head_size)
         K, V = kv.unbind(dim=-2)
@@ -233,14 +233,14 @@ class AttentionPool(nn.Module):
     def __init__(self, emb_dim):
         super().__init__()
         self.query = nn.Parameter(torch.randn(1, 1, emb_dim) * 0.02)
-        self.attn = CrossAttention(emb_dim, num_heads=8)  # reuse what you already have
+        self.attn = CrossAttention(emb_dim, num_heads=8)  
 
     def forward(self, x):
         # x: B, S, emb_dim
         B = x.shape[0]
-        q = self.query.expand(B, -1, -1)      # B, 1, emb_dim
-        pooled = self.attn(q, x)               # B, 1, emb_dim
-        return pooled.squeeze(1)               # B, emb_dim
+        q = self.query.expand(B, -1, -1)      
+        pooled = self.attn(q, x)              
+        return pooled.squeeze(1)              
     
 class BranchNet1(nn.Module):
     def __init__(self, emb_dim, H, W, K, in_channels, base_channels, n_heads, n_groups, dropout=0.1, n_transformer_layers=4, n_hidden_linear_layers=3):
@@ -358,20 +358,18 @@ class BLISSNet(nn.Module):
 
             self.branch2 = BranchNet2(self.branch1.pool, self.branch1.transformer_blocks, self.branch1.mlp_decoder, self.branch1.S, self.emb_dim, self.n_heads, self.dropout, self.K)
 
-    def generate_grid(self, height, width, device=None):
-        vec_a = torch.linspace(-1, 1, height).to(device)
-        vec_b = torch.linspace(-1, 1, width).to(device)
-
+    def generate_grid(self, height, width, bounds, device=None):
+        lat_min, lat_max, lon_min, lon_max = bounds
+        vec_a = torch.linspace(lat_min, lat_max, height).to(device)
+        vec_b = torch.linspace(lon_min, lon_max, width).to(device)
         grid_x, grid_y = torch.meshgrid(vec_a, vec_b, indexing='ij')
-        grid = torch.stack([grid_x, grid_y], dim=-1)
-
-        return grid
+        return torch.stack([grid_x, grid_y], dim=-1)
     
-    def forward(self, x, resolution, phase=0):
+    def forward(self, x, resolution, bounds, phase=0):
         H, W = resolution
         device = x.device if phase == 0 else x[0].device
 
-        grid = self.generate_grid(H, W, device).unsqueeze(0)
+        grid = self.generate_grid(H, W, bounds, device).unsqueeze(0)
         basis = self.trunk_net(grid) # 1, H, W, K
 
         if phase == 0:
