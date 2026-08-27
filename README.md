@@ -45,6 +45,44 @@ This implementation follows the architecture and training procedure described in
 - Three independently trained models, one per region (South Asia, Punjab, Karnataka), each trained for 15 epochs per stage.
 - A 3x3 cross-region inference evaluation: each trained model was run against all three regions' test data, at 4x super-resolution, with RMSE, MAE, bias, and R² recorded for every combination.
 
+## Architecture Sketch
+
+```
+Stage 1 (fully observed grid, per region)
+------------------------------------------
+  coordinates (x, y)                 t2m grid
+        |                                |
+        v                                v
+  SIREN trunk network          Attention U-Net branch
+  (fixed basis functions,             (coefficients)
+   tied to region's                        |
+   coordinate domain)                      |
+        |                                  |
+        +----------------+-----------------+
+                          |
+              reconstructed field =
+        sum over basis functions, weighted
+              by Stage 1 coefficients
+
+
+Stage 2 (sparse, variable-count sensors)
+------------------------------------------
+  sparse sensor observations
+        |
+        v
+  Transformer encoder -> fixed-size cross-attention
+  (trunk and coefficient decoder frozen from Stage 1)
+        |
+        v
+       coefficients
+        |
+        v
+  reconstructed field = same trunk basis functions,
+              weighted by Stage 2 coefficients
+```
+
+The trunk is what carries the region's coordinate domain. Stage 1 trains it jointly with the Attention U-Net branch on full grids. Stage 2 freezes the trunk and coefficient decoder, and trains a separate transformer + cross-attention encoder so the model can run from sparse, variable-count observations instead of a full grid. Both stages route through the same trunk basis functions, which is also why a trunk fit to one region's coordinates cannot be handed a different region's coordinates at inference and expected to work, as covered in Findings.
+
 ## Findings
 
 **In-domain performance is strong.** Each model evaluated on its own training region achieves good reconstruction accuracy. For example, the South Asia model on South Asia reaches RMSE 2.33 K and R² 95.8%; the Punjab model on Punjab reaches RMSE 1.78 K and R² 82.3%. This matches the resolution-generalization behavior reported in the original paper, where a model trained at one grid resolution reconstructs accurately at coarser or finer resolutions over the same spatial domain.
@@ -59,6 +97,19 @@ This implementation follows the architecture and training procedure described in
 
 - Python 3.10 or later
 - PyTorch, NumPy, xarray, cfgrib, Plotly, Matplotlib, tqdm, kagglehub (for `download_assets.py`)
+
+## Setup
+
+Clone the repository and install dependencies from `requirements.txt`:
+
+```
+git clone https://github.com/syeddaniyalg/blissnet-era5-inference.git
+cd blissnet-era5-inference
+pip install -r requirements.txt
+```
+
+Then follow the "Getting the data and model" steps above before running any notebook.
+
 
 ## Acknowledgments
 
