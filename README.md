@@ -96,7 +96,7 @@ The trunk is what carries the region's coordinate domain. Stage 1 trains it join
 ## Requirements
 
 - Python 3.10 or later
-- PyTorch, NumPy, xarray, cfgrib, Plotly, Matplotlib, tqdm, kagglehub (for `download_assets.py`)
+- PyTorch, NumPy, xarray, cfgrib, Plotly, Matplotlib, tqdm
 
 ## Setup
 
